@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#04070c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>DroneStats</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="preload" href="/fonts/archivo.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<canvas id="scene" aria-hidden="true"></canvas>
+<canvas id="world" aria-hidden="true"></canvas>
+<div id="labels" aria-hidden="true"></div>
+
+<div id="map">
+  <div class="tiles"></div>
+  <svg class="overlay" aria-hidden="true"><g class="rings"/><g class="plan"/><path class="trail"/><g class="home-at" data-ref="home"><circle class="hit" r="14"/><circle class="home" r="5"/></g><path class="target"/><path class="pick"/><path class="predict"/><g class="predict-end"><circle r="7"/><text x="13" y="4.5"></text></g><g class="craft-at" data-ref="craft"><circle class="hit" r="18"/><path class="craft" d="M0 -11 L7 8 L0 4 L-7 8 Z"/></g></svg>
+  <span class="credit">Esri</span>
+  <span class="scale"><i></i><span></span></span>
+  <span class="nofix" id="map-nofix"></span>
+</div>
+<div id="tools">
+  <button id="map-plan" class="tool" type="button" hidden><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 5H16.5M7.5 10H16.5M7.5 15H16.5"/><circle cx="4" cy="5" r=".6"/><circle cx="4" cy="10" r=".6"/><circle cx="4" cy="15" r=".6"/></svg></button>
+  <button id="map-fit" class="tool" type="button" hidden><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 7V3.5H7M13 3.5H16.5V7M16.5 13V16.5H13M7 16.5H3.5V13"/></svg></button>
+  <button id="view-reset" class="tool" type="button" hidden><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4"/><path d="M10 2.5V6M10 14V17.5M2.5 10H6M14 10H17.5"/></svg></button>
+  <button id="view-lock" class="tool" type="button" hidden><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4.5" y="9" width="11" height="8" rx="2"/><path class="shut" d="M7 9V6.5a3 3 0 0 1 6 0V9"/><path class="open" d="M7 9V6.5a3 3 0 0 1 5.8-1.1"/></svg></button>
+  <button id="zoom-in" class="tool" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.5V15.5M4.5 10H15.5"/></svg></button>
+  <button id="zoom-out" class="tool" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 10H15.5"/></svg></button>
+  <button id="view-switch" class="tool" type="button"></button>
+</div>
+
+<svg id="reticle" viewBox="-96 -60 192 120" aria-hidden="true">
+  <path class="line" d="M-92 0H-58M58 0H92M0 -9V-20"/>
+  <path class="line" d="M-4 -4L-18 -18M4 -4L18 -18M-4 4L-18 18M4 4L18 18"/>
+  <circle class="hub" r="2.5"/>
+  <g transform="translate(30 -30)"><circle class="ring" r="16"/><circle class="out" r="16" data-motor="0"/><text class="pct"></text></g>
+  <g transform="translate(-30 30)"><circle class="ring" r="16"/><circle class="out" r="16" data-motor="1"/><text class="pct"></text></g>
+  <g transform="translate(-30 -30)"><circle class="ring" r="16"/><circle class="out" r="16" data-motor="2"/><text class="pct"></text></g>
+  <g transform="translate(30 30)"><circle class="ring" r="16"/><circle class="out" r="16" data-motor="3"/><text class="pct"></text></g>
+</svg>
+<p id="tilt" class="small soft"></p>
+<button id="frame-open" class="tap" type="button" data-page="airframe"></button>
+
+<header id="top">
+  <button id="status" class="tap" type="button" data-page="status">
+    <span id="state"><span id="armed"></span><span id="mode" class="soft"></span><span id="sim"></span><span id="timer" class="soft"></span></span>
+    <span id="reason"></span>
+  </button>
+  <button id="nav" class="tap" type="button" data-page="position">
+    <span id="nav-main"><span id="heading"></span><span id="cardinal"></span></span>
+    <span id="home-dir" hidden><svg id="home-arrow" viewBox="-8 -8 16 16" aria-hidden="true"><path d="M0 -7L5 6L0 3L-5 6Z"/></svg><span id="home-dist"></span></span>
+    <span id="wp-dir" hidden><svg id="wp-arrow" viewBox="-8 -8 16 16" aria-hidden="true"><path d="M0 -7L5 6L0 3L-5 6Z"/></svg><span id="wp-dist"></span></span>
+  </button>
+  <div id="side">
+    <div id="side-row">
+      <button id="link" class="tap" type="button" data-page="link"></button>
+      <button id="open-control" type="button" class="plain" data-page="control"></button>
+      <button id="open-settings" type="button" class="plain"></button>
+      <button id="open" type="button" class="plain"></button>
+    </div>
+    <div id="stack" class="small">
+      <button class="tap stat keep" type="button" data-page="rc"><span class="soft" data-t="stackRc"></span><span id="st-rc"></span></button>
+      <button class="tap stat keep" type="button" data-page="position"><span class="soft" data-t="stackNav"></span><span id="st-nav"></span></button>
+      <button class="tap stat" type="button" data-page="airframe"><span class="soft" data-t="stackVib"></span><span id="st-vib"></span></button>
+      <button class="tap stat" type="button" data-page="status"><span class="soft" data-t="stackSens"></span><span id="st-sens"></span></button>
+      <button class="tap stat" id="row-fence" type="button" data-page="plan" hidden><span class="soft" data-t="stackFence"></span><span id="st-fence"></span></button>
+      <button class="tap stat" id="row-mission" type="button" data-page="plan" hidden><span class="soft" data-t="stackMission"></span><span id="st-mission"></span></button>
+      <button class="tap stat first keep" id="row-wifi" type="button" data-page="link"><span class="soft" data-t="stackWifi"></span><span id="st-wifi"><span id="st-ssid"></span><span id="st-dbm"></span><svg id="wifi-bars" viewBox="0 0 14 10" aria-hidden="true"><rect x="0" y="7" width="2.5" height="3"/><rect x="3.8" y="5" width="2.5" height="5"/><rect x="7.6" y="2.5" width="2.5" height="7.5"/><rect x="11.4" y="0" width="2.5" height="10"/></svg></span></button>
+      <button class="tap stat" id="row-ts" type="button" data-page="link" hidden><span class="soft" data-t="stackTs"></span><span id="st-ts"></span></button>
+      <button class="tap stat keep" type="button" data-page="link"><span class="soft" data-t="stackLatency"></span><span id="st-latency"></span></button>
+      <button class="tap stat" type="button" data-page="link"><span class="soft" data-t="stackFc"></span><span id="st-fc"></span></button>
+      <button class="tap stat" id="row-gcs" type="button" data-page="link" hidden><span class="soft" data-t="stackGcs"></span><span id="st-gcs"></span></button>
+      <button class="tap stat" type="button" data-page="link"><span class="soft" data-t="stackBoard"></span><span id="st-board"></span></button>
+    </div>
+  </div>
+</header>
+
+<section id="focus" hidden>
+  <div class="focus-head">
+    <h2 id="focus-title"></h2>
+    <button id="focus-close" type="button" class="plain" data-t="close"></button>
+  </div>
+  <div id="focus-body"></div>
+</section>
+
+<footer id="bottom">
+  <p id="message" role="status"></p>
+  <button id="feed" class="tap" type="button" data-page="status"></button>
+  <div id="row">
+    <div id="metrics">
+      <button class="metric tap" type="button" data-page="altitude">
+        <svg class="spark" id="spark-alt" aria-hidden="true"></svg>
+        <span class="value"><span id="alt">–</span><span class="unit">m</span></span>
+        <span class="under"><span data-t="altitude"></span></span>
+        <span id="climb" class="note soft"></span>
+      </button>
+      <button class="metric tap" type="button" data-page="speed">
+        <svg class="spark" id="spark-speed" aria-hidden="true"></svg>
+        <span class="value"><span id="speed">–</span><span class="unit">m/s</span></span>
+        <span class="under"><span data-t="speed"></span></span>
+        <span id="throttle" class="note soft"></span>
+      </button>
+      <button class="metric wide tap" type="button" data-page="battery">
+        <svg class="spark" id="spark-volts" aria-hidden="true"></svg>
+        <span class="value"><span id="volts">–</span><span class="unit">V</span></span>
+        <span class="under"><span data-t="battery"></span><span id="cell" class="soft"></span></span>
+        <span id="margin" class="note soft"></span>
+      </button>
+    </div>
+    <button id="geo" class="tap" type="button" data-page="position">
+      <span id="sats"></span>
+      <span id="fix-row" class="small"><span id="fix"></span><span id="hdop" class="soft"></span></span>
+    </button>
+    <button id="swap" type="button"></button>
+  </div>
+</footer>
+
+<section id="dock" hidden>
+  <p id="dock-note"></p>
+  <div id="dock-bar">
+    <button id="do-arm" type="button" class="hold"><span></span></button>
+    <div id="do-modes"></div>
+    <button id="do-panel" type="button" class="plain" data-page="control"></button>
+    <button id="do-exit" type="button" class="plain"></button>
+  </div>
+</section>
+
+<section id="predict" hidden>
+  <p id="predict-note"></p>
+  <p id="predict-warn" class="amber"></p>
+  <div id="predict-bar">
+    <button id="predict-go" type="button" class="hold"><span></span></button>
+    <button id="predict-cancel" type="button" class="plain"></button>
+  </div>
+</section>
+
+<aside id="card" hidden>
+  <div class="card-head">
+    <h2 id="card-title"></h2>
+    <button id="card-close" type="button" class="plain" data-t="close"></button>
+  </div>
+  <div id="card-body"></div>
+</aside>
+
+<aside id="plan-drawer" hidden>
+  <div class="card-head">
+    <h2 data-t="mapPlan"></h2>
+    <button id="plan-close" type="button" class="plain" data-t="close"></button>
+  </div>
+  <p id="plan-state" class="small"></p>
+  <p id="plan-summary"></p>
+  <div id="plan-list"></div>
+  <div id="plan-warn"></div>
+  <div class="act-row">
+    <button id="plan-add" type="button" class="switch" role="switch" aria-checked="false"><span data-t="planAddMode"></span><i></i></button>
+    <label class="field"><span class="soft" data-t="planDefaultAlt"></span><input id="plan-alt" type="number" inputmode="decimal" step="any"></label>
+  </div>
+  <div class="act-row">
+    <button id="plan-takeoff" type="button" class="tile" data-t="planAddTakeoff"></button>
+    <button id="plan-rtl" type="button" class="tile" data-t="planAddRtl"></button>
+    <button id="plan-edit" type="button" class="tile" data-t="planEditHere"></button>
+    <button id="plan-new" type="button" class="tile" data-t="planNew"></button>
+    <button id="plan-import" type="button" class="tile" data-t="planImport"></button>
+    <button id="plan-export" type="button" class="tile" data-t="planExport"></button>
+    <input id="plan-file" type="file" accept=".waypoints,.txt,.plan,.json" hidden>
+  </div>
+  <div class="act-row">
+    <button id="plan-write" type="button" class="hold tile red"><span data-t="planWrite"></span></button>
+    <button id="plan-discard" type="button" class="tile" data-t="planDiscard"></button>
+  </div>
+  <div id="plan-extras" class="act-row"></div>
+  <div class="card-why">
+    <p id="plan-why" class="small soft"></p>
+    <button id="plan-open-control" type="button" class="plain small" data-page="control" data-t="openControl" hidden></button>
+  </div>
+</aside>
+
+<aside id="details" class="sheet" aria-hidden="true" inert>
+  <div class="head">
+    <h2 data-t="details"></h2>
+    <button id="close" type="button" class="plain" data-t="close"></button>
+  </div>
+  <section class="group" id="exec-unit">
+    <h2 data-t="pageControl"></h2>
+    <p id="exec-state" class="danger"></p>
+    <button id="exec-on" type="button" class="hold tile red"><span data-t="execHold"></span></button>
+    <div class="act-row">
+      <button id="exec-panel" type="button" class="tile" data-page="control" data-t="openControl"></button>
+      <button id="exec-off" type="button" class="tile" data-t="execOff"></button>
+    </div>
+  </section>
+  <div id="sections"></div>
+</aside>
+
+<aside id="settings" class="sheet" aria-hidden="true" inert>
+  <div class="head">
+    <h2 data-t="settings"></h2>
+    <button id="settings-close" type="button" class="plain" data-t="close"></button>
+  </div>
+  <section class="group">
+    <h2 data-t="display"></h2>
+    <div class="switches">
+      <button type="button" class="switch" role="switch" data-show="trail"><span data-t="trail"></span><i></i></button>
+      <button type="button" class="switch" role="switch" data-show="rings"><span data-t="rings"></span><i></i></button>
+      <button type="button" class="switch" role="switch" data-show="tiles"><span data-t="tiles"></span><i></i></button>
+      <button type="button" class="switch" role="switch" data-show="plan"><span></span><i></i></button>
+      <button type="button" class="switch" role="switch" data-show="fence"><span></span><i></i></button>
+      <button type="button" class="switch" role="switch" data-show="rally"><span></span><i></i></button>
+      <button type="button" class="switch" role="switch" data-show="notes"><span></span><i></i></button>
+    </div>
+    <button type="button" class="tile spaced" data-page="plan" data-t="pagePlan"></button>
+  </section>
+  <section class="group">
+    <h2 data-t="marker"></h2>
+    <div class="segments">
+      <button type="button" data-marker="s" data-t="markerS"></button>
+      <button type="button" data-marker="m" data-t="markerM"></button>
+      <button type="button" data-marker="l" data-t="markerL"></button>
+    </div>
+  </section>
+  <section class="group">
+    <h2 data-t="language"></h2>
+    <div class="segments">
+      <button type="button" data-lang="zh">中文</button>
+      <button type="button" data-lang="en">English</button>
+    </div>
+  </section>
+</aside>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

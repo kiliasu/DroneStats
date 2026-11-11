@@ -1,0 +1,39 @@
+# The DroneStats service. install.sh fills in the @NAMES@ and installs it, as a system unit or, with
+# --user, as a per-user one, which leaves out what only a system unit can set.
+[Unit]
+Description=DroneStats MAVLink dashboard
+Wants=network-online.target
+After=network-online.target mavlink-router.service tailscaled.service @AFTER@
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@DIR@
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@DIR@/.venv/bin/python server.py @ARGS@
+Restart=always
+RestartSec=3
+
+# Never compete with MAVLink traffic or anything else on the same computer.
+Nice=10
+CPUWeight=20
+CPUQuota=25%
+MemoryMax=96M
+IOSchedulingClass=idle
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Marks placed on the map are kept here: /var/lib/dronestats, or for a per-user unit under ~/.config
+# or ~/.local/state, depending on the version of systemd.
+StateDirectory=dronestats
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+# AF_NETLINK is for `iw`, which reads the Wi-Fi link.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=@WANTED_BY@

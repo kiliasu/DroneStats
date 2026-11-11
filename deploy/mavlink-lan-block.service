@@ -1,0 +1,20 @@
+[Unit]
+Description=Allow the MAVLink router port only from this computer and Tailscale
+# mavlink-router listens on every interface and cannot be told otherwise, so the firewall
+# closes port 5678 before it starts. tailscaled in userspace mode dials it over loopback.
+Before=mavlink-router.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/iptables -w -I INPUT -p tcp --dport 5678 ! -i lo -j REJECT --reject-with tcp-reset
+ExecStart=/usr/sbin/iptables -w -I INPUT -p tcp --dport 5678 -i tailscale0 -j ACCEPT
+ExecStart=/usr/sbin/ip6tables -w -I INPUT -p tcp --dport 5678 ! -i lo -j REJECT --reject-with tcp-reset
+ExecStart=/usr/sbin/ip6tables -w -I INPUT -p tcp --dport 5678 -i tailscale0 -j ACCEPT
+ExecStop=-/usr/sbin/iptables -w -D INPUT -p tcp --dport 5678 -i tailscale0 -j ACCEPT
+ExecStop=-/usr/sbin/iptables -w -D INPUT -p tcp --dport 5678 ! -i lo -j REJECT --reject-with tcp-reset
+ExecStop=-/usr/sbin/ip6tables -w -D INPUT -p tcp --dport 5678 -i tailscale0 -j ACCEPT
+ExecStop=-/usr/sbin/ip6tables -w -D INPUT -p tcp --dport 5678 ! -i lo -j REJECT --reject-with tcp-reset
+
+[Install]
+WantedBy=multi-user.target

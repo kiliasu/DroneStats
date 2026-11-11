@@ -1,0 +1,21 @@
+# An ArduCopter SITL for DroneStats to read, installed by `install.sh --sitl <ardupilot>`. Its
+# parameters and flight logs stay in its own folder. It does not wait for a connection, so it has a
+# position and is ready by the time anybody opens the page.
+[Unit]
+Description=ArduCopter SITL for DroneStats
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@SITL_DIR@
+# A quad X, the frame the page draws its motors for. TCP port 5760 + 10 x instance for the dashboard,
+# and the same + 2 for a ground station beside it.
+ExecStart=@ARDUPILOT@/build/sitl/bin/arducopter --model X --speedup 1 --defaults @ARDUPILOT@/Tools/autotest/default_params/copter.parm,@DIR@/deploy/dronestats-sitl.parm -I@SITL_INSTANCE@ --serial0 tcp:0 --home @SITL_HOME@
+Restart=always
+RestartSec=5
+Nice=10
+MemoryMax=256M
+
+[Install]
+WantedBy=@WANTED_BY@

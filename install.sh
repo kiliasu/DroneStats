@@ -150,7 +150,7 @@ if [ "$SCOPE" = none ]; then
   echo "  cd $DIR && .venv/bin/python server.py $ARGS"
   exit 0
 fi
-command -v systemctl >/dev/null || die "systemd was not found; use --no-service and start it by hand"
+command -v systemctl >/dev/null && [ -d /run/systemd/system ] || die "systemd is not running here; use --no-service and start it by hand"
 
 # Fills in a template. Per-user units cannot set a user or use the kernel and address-family limits.
 render() {

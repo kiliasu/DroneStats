@@ -75,7 +75,7 @@ change any of them. Start from Orange Pi's Ubuntu 26.04 image for the Zero 3W.
 
        sudo apt update
        sudo apt install git python3-venv iw
-       git clone <this repository> ~/DroneStats
+       git clone https://github.com/kiliasu/DroneStats.git ~/DroneStats
 
 2. **The flight controller's UART, and mavlink-router.** Wire the flight controller's TELEM port to the
    40-pin header: pin 11 (UART2 TX) to its RX, pin 13 (UART2 RX) to its TX, and pin 9 to its ground.

@@ -58,7 +58,7 @@ DroneStats 针对一套固定的环境编写，部署就是复现这套环境。
 
        sudo apt update
        sudo apt install git python3-venv iw
-       git clone <本仓库地址> ~/DroneStats
+       git clone https://github.com/kiliasu/DroneStats.git ~/DroneStats
 
 2. **连接飞控的 UART 和 mavlink-router**。把飞控的 TELEM 口接到 40 针排针：11 脚（UART2 TX）接飞控 RX，13 脚（UART2 RX）接飞控 TX，9 脚接飞控 GND。两者分别供电，只共地。在飞控上把对应端口设为 `SERIALn_PROTOCOL` 2（MAVLink 2）、`SERIALn_BAUD` 57（57600）。
 

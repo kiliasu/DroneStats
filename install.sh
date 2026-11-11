@@ -208,6 +208,24 @@ case "$HOST" in
   *) echo "  Note: any device that can open the page can turn on execution and command the aircraft." ;;
 esac
 [ -n "$ARDUPILOT" ] && echo "  The simulator's ground station port: TCP $((5762 + 10 * SITL_INSTANCE))."
+
+# The parts of this computer the README asks for that live outside this folder. None of them stops the
+# install: the page works without them, and the router may not be up yet. They are checked so that a
+# new computer missing one says so now, rather than as an empty reading on the page later.
+if [ -z "$ARDUPILOT" ] && ! "$PY" -c 'import socket, sys; h, p = sys.argv[1].rsplit(":", 1); socket.create_connection((h, int(p)), 2).close()' "$MAVLINK" 2>/dev/null; then
+  echo "  Nothing answers on $MAVLINK yet: is mavlink-router running, with TcpServerPort = ${MAVLINK##*:}?"
+fi
+command -v iw >/dev/null || [ -x /usr/sbin/iw ] || [ -x /sbin/iw ] || echo "  iw is not installed, so the page has no Wi-Fi reading: sudo apt install iw"
+case "$HOST" in
+  127.0.0.1|localhost|"[::1]")
+    if [ ! -S /run/tailscale/tailscaled.sock ]; then
+      echo "  Tailscale is not running, so the page opens on this computer only."
+    elif [ -e /sys/class/net/tailscale0 ]; then
+      # Only userspace networking delivers tailnet connections over loopback; with an interface they
+      # arrive at the Tailscale address, which a page on $LISTEN does not listen on.
+      echo "  Tailscale is not in userspace networking mode, so the tailnet cannot reach $LISTEN (see the README)."
+    fi ;;
+esac
 if [ "$SCOPE" = user ] && ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes; then
   echo "  A per-user service stops when you log out. To keep it running and start it at boot:"
   echo "    sudo loginctl enable-linger $(id -un)"

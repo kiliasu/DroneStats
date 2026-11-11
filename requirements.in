@@ -1,0 +1,4 @@
+# The packages DroneStats uses directly. requirements.txt pins them and everything they need, with
+# their hashes, so every install gets the same files. After changing this one, regenerate it with the
+# command at the top of requirements.txt.
+pymavlink>=2.4.50,<3

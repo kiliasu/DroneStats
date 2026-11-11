@@ -1,5 +1,7 @@
 # DroneStats
 
+[中文说明](README.zh-CN.md)
+
 A live MAVLink dashboard for an ArduPilot multicopter, run on the companion computer and opened in any
 browser. It shows the view from the aircraft or from behind it as a 3D scene drawn by the viewer's GPU,
 a satellite map, the stored mission, fence and rally points, battery forecasts, link quality and the
@@ -7,37 +9,155 @@ flight controller's own checks. It is read-only until a viewer turns on executio
 through the map: fly here, land here, return, a mission, each shown on the main page as the way it would
 go before it is sent. Chinese and English.
 
-一个运行在机载电脑上的 ArduPilot 多旋翼实时仪表盘，用浏览器打开。默认只读；开启执行后，可在地图上直接下达飞往、降落、返航、任务等指令，发送前先在主页面显示预测航线和终点。界面支持中文和英文。
+<p align="center">
+  <img src="docs/screenshots/third-person-en.webp" width="49%" alt="The 3D view from behind and above the aircraft as it flies a mission">
+  <img src="docs/screenshots/mission-map-en.webp" width="49%" alt="The same moment on the satellite map: the mission, the path flown and the aircraft">
+</p>
+
+Above: the pretend flight controller in `tools/fake_fc.py` flying its sample mission over ArduPilot's
+default simulator location, from behind the aircraft and on the map.
+
+> **Safety.** With execution on, this software commands a real aircraft: it can arm it, fly it, and stop
+> its motors in the air. Fly only where a mistake would hurt no one, with a transmitter in hand that can
+> take over at any moment. Check any change against SITL (`tools/sitl_check.py`) before flying it. It
+> comes with no warranty; see `LICENSE`.
+
+## How it fits together
+
+```text
+flight controller (ArduCopter 4.7)
+        │ UART2 (/dev/ttyS2), MAVLink 2 at 57600 baud
+        ▼
+mavlink-router ──── TCP 5678 ───▶ ground station, if any
+        │ TCP 127.0.0.1:5678
+        ▼
+DroneStats (server.py) ── HTTP on 127.0.0.1:8080
+        │ connections from the tailnet arrive over loopback
+        ▼
+Tailscale, userspace networking ──▶ a browser on any device in the tailnet
+```
+
+DroneStats is one Python process, `server.py`, whose only direct dependency is pymavlink. It connects to
+mavlink-router only while a page is open, keeps the vehicle's state and up to 30 minutes of history, and
+serves the page in `web/` with live updates as Server-Sent Events. Everything the page draws, the 3D view
+and the route predictions included, is worked out in the viewer's browser.
+
+## Reference environment
+
+DroneStats is made for one setup, and deploying it means reproducing that setup. Other computers,
+operating systems and airframes are not looked after.
+
+| Part | Reference | What depends on it |
+| --- | --- | --- |
+| Companion computer | Orange Pi Zero 3W with 6 GB, the Allwinner A733 (`sun60iw2`) version. Many boards sold under that name are an H618 instead, with other serial ports | `board.py` reads `/proc` and `/sys`; the UART below |
+| Operating system | Orange Pi's Ubuntu 26.04.1 LTS image, version 1.0.2, kernel 6.6.98-sun60iw2, systemd 259 | `install.sh` installs systemd services |
+| Python | 3.14.4, the system's `python3` with `python3-venv` (3.11 or newer works) | `install.sh` makes `.venv` with it |
+| Python packages | Exactly those in `requirements.txt`: pymavlink 2.4.50 and what it needs | Installed with their hashes, so every install gets the same files |
+| MAVLink router | mavlink-router (upstream commit `2362c62`), the flight controller on UART2 (`/dev/ttyS2`) at 57600 baud, a TCP server on port 5678: `deploy/mavlink-router.conf` | The defaults `--mavlink 127.0.0.1:5678` and `--baud 57600` |
+| Remote access | Tailscale 1.104.5 in userspace networking mode | The page listens on loopback and is still reached over the tailnet |
+| Firewall | `deploy/mavlink-lan-block.service`, with iptables 1.8.11 (nf_tables) | Keeps the local network off port 5678; optional |
+| Wi-Fi reading | iw 6.17 | The Wi-Fi panel; optional |
+| Flight controller | ArduCopter 4.7.1 | Parameter names and units, and the route predictions |
+| Airframe | Quad X (`FRAME_CLASS` 1, `FRAME_TYPE` 1), drawn at the size of a 7-inch quad | The motor gauges and the aircraft in the 3D view |
+| Battery | LiPo, with the number of cells given to `install.sh --cells` | The battery forecast |
+
+The versions are what `tools/env_report.sh` printed on the reference computer. To compare another
+computer with it, run the same script there. It prints the board, the system, the Python and package
+versions, the mavlink-router configuration and the Tailscale mode, and leaves out host names, addresses
+and network names, so its output can be shared.
+
+## Preparing the computer
+
+These are the parts outside this repository that DroneStats relies on. `install.sh` does not install or
+change any of them. Start from Orange Pi's Ubuntu 26.04 image for the Zero 3W.
+
+1. **Base packages, and this repository**, whose `deploy/` folder the next steps use:
+
+       sudo apt update
+       sudo apt install git python3-venv iw
+       git clone <this repository> ~/DroneStats
+
+2. **The flight controller's UART, and mavlink-router.** Wire the flight controller's TELEM port to the
+   40-pin header: pin 11 (UART2 TX) to its RX, pin 13 (UART2 RX) to its TX, and pin 9 to its ground.
+   Power the two separately and share only ground. On the flight controller set that port to
+   `SERIALn_PROTOCOL` 2 (MAVLink 2) and `SERIALn_BAUD` 57 (57600).
+
+   The reference computer was set up with Prof. Peter Burke's
+   [installmavlinkrouterorangepizero3w](https://github.com/PeterJBurke/installmavlinkrouterorangepizero3w),
+   whose defaults are these values: it enables UART2 (`overlays=uart2` in `/boot/orangepiEnv.txt`),
+   installs mavlink-router as a service and writes the configuration in `deploy/mavlink-router.conf`. Its
+   README lists what else it changes, such as turning off Wi-Fi power saving.
+
+       wget -O install-mavlink-router.sh https://raw.githubusercontent.com/PeterJBurke/installmavlinkrouterorangepizero3w/main/install.sh
+       chmod +x install-mavlink-router.sh
+       sudo ./install-mavlink-router.sh 2>&1 | tee MavlinkRouterBuildlog.txt
+       sudo reboot
+
+   To do it by hand instead, add `uart2` to the `overlays=` line in `/boot/orangepiEnv.txt`, build
+   [mavlink-router](https://github.com/mavlink-router/mavlink-router) at commit `2362c62` as its README
+   describes, and install `deploy/mavlink-router.conf` as `/etc/mavlink-router/main.conf`.
+
+3. **Tailscale, in userspace networking mode.** In that mode connections from the tailnet arrive over
+   loopback, which is where the page listens:
+
+       curl -fsSL https://tailscale.com/install.sh | sh
+       sudo sed -i 's/^FLAGS=.*/FLAGS="--tun=userspace-networking"/' /etc/default/tailscaled
+       sudo systemctl restart tailscaled
+       sudo tailscale up
+
+4. **Optionally, the firewall unit.** mavlink-router's TCP server listens on every interface and cannot
+   be told otherwise. `deploy/mavlink-lan-block.service` closes port 5678 to everything but loopback and
+   `tailscale0`, so the local network cannot reach the flight controller through it:
+
+       sudo apt install iptables
+       sudo install -m 644 ~/DroneStats/deploy/mavlink-lan-block.service /etc/systemd/system/
+       sudo systemctl daemon-reload
+       sudo systemctl enable --now mavlink-lan-block
 
 ## Install
 
-On the companion computer (Linux with systemd, Python 3.11 or newer):
-
-    git clone <this repository> DroneStats
-    cd DroneStats
+    cd ~/DroneStats
     ./install.sh
 
-That makes a Python environment in `.venv`, installs `pymavlink`, and starts a service at boot that reads
-MAVLink from `127.0.0.1:5678` and serves the page on `127.0.0.1:8080`. Change either with options:
+That makes a Python environment in `.venv`, installs the pinned packages in `requirements.txt`, and
+starts a service at boot that reads MAVLink from `127.0.0.1:5678` and serves the page on
+`127.0.0.1:8080`. Change either with options:
 
 | Option | Default | |
 | --- | --- | --- |
 | `--mavlink HOST:PORT` | `127.0.0.1:5678` | Any MAVLink TCP endpoint: mavlink-router, MAVProxy, SITL |
 | `--listen ADDR:PORT` | `127.0.0.1:8080` | `0.0.0.0:8080` to open it from the local network |
-| `--allow-host NAME` | | Another name the page may be opened by, such as `drone.example.com` |
+| `--allow-host NAME` | | Another name the page may be opened by, such as `drone.example.com` (repeatable) |
 | `--cells N` | 2 (3 with `--sitl`) | Battery cells in series |
 | `--baud N` | 57600 | Speed of the serial link to the flight controller, for the link load reading |
 | `--sitl DIR` | | Also run an ArduCopter SITL built in this ArduPilot checkout, and read that |
 | `--sitl-home LAT,LON,ALT,HDG` | ArduPilot's default | Where the simulated aircraft starts |
+| `--sitl-instance N` | 2 | The SITL instance, which sets its ports: TCP 5760 + 10 × N |
 | `--user` | | A per-user service, with no root |
 | `--no-service` | | Only the environment, to start it by hand |
 | `--uninstall` | | Remove the services; keep the code, `.venv` and marks |
 
-Run it again with other options to change them. Then:
+Run it again with other options to change them. It ends by saying which of mavlink-router, `iw` and
+Tailscale in userspace mode it could not find; `tools/env_report.sh` shows the rest.
+
+## Running it
 
     systemctl status dronestats
     journalctl -u dronestats -f              # every command sent is in here
     sudo systemctl restart dronestats        # after editing files in web/
+
+To update, pull and run `install.sh` again with the same options as before (`systemctl cat dronestats`
+shows them). It installs the pinned packages again and restarts the service:
+
+    cd ~/DroneStats
+    git pull
+    ./install.sh --cells 3                   # for example
+
+`./install.sh --uninstall` removes the services and leaves the code, `.venv` and the marks.
+
+Marks placed on the map are kept in `/var/lib/dronestats/marks.json` for the system service. A per-user
+service keeps them under `~/.local/state/dronestats` or `~/.config/dronestats`, depending on the version
+of systemd, and `server.py` started by hand keeps them in `state/` beside the code.
 
 ### Reaching the page
 
@@ -48,7 +168,7 @@ over loopback, so the page is reachable from the tailnet and not from the local 
 The page answers to addresses typed as numbers, to this computer's own name (with `.local` or its
 tailnet domain), and to names given with `--allow-host`. Any other name is refused, which stops other
 web pages from reaching it through DNS rebinding. Anyone who can open the page can turn on execution:
-treat the network it is on as the security boundary.
+treat the network it is on as the security boundary. At most 8 pages can be open at once.
 
 ### A simulated aircraft
 
@@ -58,13 +178,6 @@ runs ArduCopter SITL as a second service (a quad X, instance 2: TCP 5780, and 57
 station) and points the dashboard at it. The page and its browser tab say "Sim", so it cannot be taken
 for a real aircraft. SITL's own ports listen on every interface; keep them behind a firewall. Build SITL
 first with `./waf configure --board sitl && ./waf copter` in the ArduPilot checkout.
-
-### mavlink-router
-
-On a companion computer the flight controller's serial port usually goes through
-[mavlink-router](https://github.com/mavlink-router/mavlink-router), which offers TCP 5678.
-mavlink-router listens on every interface and cannot be told otherwise; `deploy/mavlink-lan-block.service`
-is an optional unit that closes that port to everything but loopback and `tailscale0`.
 
 ## What it sends to the flight controller
 
@@ -149,23 +262,18 @@ sees them, and they are kept in the service's state directory.
 - Settings: flight path, distance rings, imagery, stored plan, marks, the size of the aircraft symbol,
   language. Keys: V view, M map, L lock, R reset, F fit, P mission list, Delete the open waypoint, + and -.
 
-## Files
+## Troubleshooting
 
-- `server.py`: web server, live updates, command gate
-- `telemetry.py`: MAVLink link, state, and up to 30 minutes of history while someone is watching
-- `commands.py`: every action that can be asked of the flight controller, and the rules for each
-- `plans.py`: reading and writing the stored mission, fence and rally points
-- `marks.py`: places marked on the map
-- `wire.py`: the MAVLink dialect and this service's IDs, the one place that names the library
-- `board.py`, `network.py`: health of this computer and how it is connected
-- `web/`: the page. `app.js` runs it, `scene.js` the 3D view, `map.js` the map, `mapui.js` the cards and
-  the mission list, `control.js` the control panel, `predict.js` the way a command would go, `plan.js`
-  the shapes of what is stored and ground station files, `pages.js` the expanded views, `shared.js` the
-  battery forecast, pre-flight checks and flight path
-- `deploy/`: unit templates for `install.sh`, and the optional mavlink-router firewall unit
-- `tools/fake_fc.py`: a pretend flight controller for development and tests
-- `tools/sitl_check.py`: flies ArduPilot SITL through every action, to check them against real firmware
-- `tests/`: end-to-end tests against the pretend flight controller
+| What you see | What it means | What to check |
+| --- | --- | --- |
+| "Cannot reach the MAVLink router" | Nothing accepts a TCP connection on `--mavlink` | `systemctl status mavlink-router`, and that `TcpServerPort` in its configuration is that port |
+| "Waiting for flight controller" | The router answers, but no autopilot heartbeat comes through it | The UART wiring (TX to RX), `overlays=uart2`, `Device` and `Baud` in the router's configuration, `SERIALn_PROTOCOL` and `SERIALn_BAUD` on the flight controller |
+| "Link lost" | Heartbeats stopped for 3 seconds | The flight controller's power and the cable |
+| A blank page, status 421 | The page was opened by a name it does not answer to | Open it by its address, this computer's name or its tailnet name, or add the name with `--allow-host` |
+| Unreachable from the tailnet | Tailscale is not in userspace mode, or not running | `tools/env_report.sh` shows the Tailscale mode; see step 3 above |
+| No satellite imagery | The viewer's browser fetches the imagery itself | The device the page is open on needs internet access |
+| No Wi-Fi reading | `iw` is missing, or this computer has no Wi-Fi | `sudo apt install iw` |
+| The service does not start | | `journalctl -u dronestats -e` |
 
 ## Development
 
@@ -188,13 +296,44 @@ It flies the simulator, so use the same firmware version as the aircraft. Before
 for `SIM_SPEEDUP`, a setting only simulators have, and stops if there is no answer.
 
 Parameter names follow ArduCopter 4.7, which moved several from centimetres to metres. The aircraft is
-drawn at the size set by `ARM` and `ROTOR` in `web/scene.js` (a 7-inch quad); change them for another
-airframe. Battery reference points per cell are in `web/shared.js`.
+drawn at the size set by `ARM` and `ROTOR` in `web/scene.js` (a 7-inch quad). Battery reference points
+per cell are in `web/shared.js`.
+
+Python packages are named in `requirements.in` and pinned, with their hashes, in `requirements.txt`. To
+move to newer versions, regenerate it with [uv](https://docs.astral.sh/uv/), then run the tests and the
+SITL check before deploying it:
+
+    uv pip compile requirements.in --universal --python-version 3.11 --generate-hashes -o requirements.txt
+
+## Files
+
+- `server.py`: web server, live updates, command gate
+- `telemetry.py`: MAVLink link, state, and up to 30 minutes of history while someone is watching
+- `commands.py`: every action that can be asked of the flight controller, and the rules for each
+- `plans.py`: reading and writing the stored mission, fence and rally points
+- `marks.py`: places marked on the map
+- `wire.py`: the MAVLink dialect and this service's IDs, the one place that names the library
+- `board.py`, `network.py`: health of this computer and how it is connected
+- `web/`: the page. `app.js` runs it, `scene.js` the 3D view, `map.js` the map, `mapui.js` the cards and
+  the mission list, `control.js` the control panel, `predict.js` the way a command would go, `plan.js`
+  the shapes of what is stored and ground station files, `pages.js` the expanded views, `shared.js` the
+  battery forecast, pre-flight checks and flight path
+- `install.sh`: the Python environment and the services
+- `requirements.in`, `requirements.txt`: the Python packages, and those pinned with their hashes
+- `deploy/`: unit templates for `install.sh`, the reference mavlink-router configuration, and the
+  optional firewall unit
+- `tools/fake_fc.py`: a pretend flight controller for development and tests
+- `tools/sitl_check.py`: flies ArduPilot SITL through every action, to check them against real firmware
+- `tools/env_report.sh`: what a computer has of the reference environment
+- `tests/`: end-to-end tests against the pretend flight controller
+- `docs/screenshots/`: the pictures at the top of the READMEs
 
 ## Credits
 
-Map imagery is Esri World Imagery, requested by the viewer's browser for the aircraft's position; check
-Esri's terms before relying on it. The Archivo font is under the SIL Open Font License. Built on
+mavlink-router on the reference computer, and the UART it uses, were set up with Prof. Peter Burke's
+[installmavlinkrouterorangepizero3w](https://github.com/PeterJBurke/installmavlinkrouterorangepizero3w);
+the wiring in `deploy/mavlink-router.conf` follows its README. Map imagery is Esri World Imagery,
+requested by the viewer's browser for the aircraft's position; check Esri's terms before relying on it. The Archivo font is under the SIL Open Font License. Built on
 [pymavlink](https://github.com/ArduPilot/pymavlink).
 
 ## License

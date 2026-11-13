@@ -133,6 +133,10 @@ else
   uv pip install --quiet --python .venv/bin/python -r requirements.txt
 fi
 PY=$DIR/.venv/bin/python
+# The service cannot write compiled files beside the packages. Without them it would compile the MAVLink
+# dialect at every start, which takes 140 MB for a moment: more than its unit allows it, so it would be
+# killed as it starts. pip compiles what it installs and uv does not, so make sure of it either way.
+"$PY" -W ignore -m compileall -q "$DIR/.venv/lib" >/dev/null 2>&1 || true
 
 # ---- What the service runs --------------------------------------------------------------------------
 

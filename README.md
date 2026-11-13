@@ -10,12 +10,16 @@ through the map: fly here, land here, return, a mission, each shown on the main 
 go before it is sent. Chinese and English.
 
 <p align="center">
-  <img src="docs/screenshots/third-person-en.webp" width="49%" alt="The 3D view from behind and above the aircraft as it flies a mission">
-  <img src="docs/screenshots/mission-map-en.webp" width="49%" alt="The same moment on the satellite map: the mission, the path flown and the aircraft">
+  <img src="docs/screenshots/third-person-en.webp" width="100%" alt="The 3D view from behind and above: the mission, the way flown so far and the aircraft, under a low sun">
+</p>
+<p align="center">
+  <img src="docs/screenshots/first-person-en.webp" width="49%" alt="The view from the aircraft, banked in a circle, with each motor's output on the sight">
+  <img src="docs/screenshots/mission-map-en.webp" width="49%" alt="The map: the mission, the way flown, and the way home as it would go, before it is sent">
 </p>
 
-Above: the pretend flight controller in `tools/fake_fc.py` flying its sample mission over ArduPilot's
-default simulator location, from behind the aircraft and on the map.
+Above: ArduCopter 4.7.1 in its simulator, flying a mission over ArduPilot's default simulator location
+under that place's own evening sky, which the page says with "Sim". From behind and above; from the
+aircraft, banked in a circle; and on the map, with the way home shown before it is sent.
 
 > **Safety.** With execution on, this software commands a real aircraft: it can arm it, fly it, and stop
 > its motors in the air. Fly only where a mistake would hurt no one, with a transmitter in hand that can

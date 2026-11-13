@@ -5,11 +5,14 @@
 一个运行在机载电脑上的 ArduPilot 多旋翼实时 MAVLink 仪表盘，用任意浏览器打开。它用观看者的 GPU 绘制机上视角或机后视角的 3D 场景，并显示卫星地图、飞控中存储的任务、围栏和集结点、电池预测、链路质量以及飞控自身的检查结果。默认只读；观看者开启执行后，可以在地图上直接下达指令：飞往、降落、返航、执行任务。每条指令发送前，先在主页面上显示它将飞行的路线。界面支持中文和英文。
 
 <p align="center">
-  <img src="docs/screenshots/third-person-zh.webp" width="49%" alt="执行任务时，从飞行器后上方看的 3D 视图">
-  <img src="docs/screenshots/mission-map-zh.webp" width="49%" alt="同一时刻的卫星地图：任务航线、已飞轨迹和飞行器">
+  <img src="docs/screenshots/third-person-zh.webp" width="100%" alt="从后上方看的 3D 视图：任务航线、已飞轨迹和飞行器，远处是落日">
+</p>
+<p align="center">
+  <img src="docs/screenshots/first-person-zh.webp" width="49%" alt="机上视角：绕圈时压着坡度，准星上是每个电机的输出">
+  <img src="docs/screenshots/mission-map-zh.webp" width="49%" alt="地图：任务航线、已飞轨迹，以及发送前先显示的返航路线">
 </p>
 
-上图为 `tools/fake_fc.py` 中的模拟飞控在 ArduPilot 默认模拟地点执行示例任务时，机后视角和地图上的样子。
+上图为 ArduCopter 4.7.1 在其模拟器中执行任务的画面，地点是 ArduPilot 默认的模拟位置，天空是那里傍晚的样子，页面上标有“模拟”。依次是：从后上方看；机上视角，绕圈时压着坡度；地图上，返航路线在发送前先显示出来。
 
 > **安全提示**：开启执行后，本软件会控制一架真实的飞行器：它能解锁、飞行，也能在空中停桨。只在出错也不会伤到人的地方飞行，并始终手持能随时接管的遥控器。任何改动都应先用 SITL（`tools/sitl_check.py`）验证再上机。本软件不提供任何担保，见 `LICENSE`。
 

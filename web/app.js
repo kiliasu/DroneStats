@@ -247,7 +247,7 @@ function renderScene() {
     trailShown = store.trailVersion;
     trailLocal = store.trail.map(p => [...toLocal(p[0], p[1]), p[2], p[3]]);
   }
-  scene.setTrail(origin ? trailLocal : null);
+  scene.setTrail(origin ? trailLocal : null, !!S.armed && has);
   const heading = S.att ? (S.att[2] * 180 / Math.PI + 360) % 360 : 0;
   map.update(has ? S.pos[0] : null, has ? S.pos[1] : null, heading, S.home ? [S.home[0], S.home[1]] : null, store.trail, store.trailVersion);
 

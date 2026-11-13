@@ -292,6 +292,7 @@ export class Scene {
     this.hud = { avoid: [], clear: [], fadeTop: 64, fadeBottom: null, aimY: null };
     this.fades = null;
     this.trail = null;
+    this.trailFlying = false;
     this.homePoint = null;
     this.live = 0; this.liveTarget = 0;
     this.fade = 0;
@@ -500,10 +501,12 @@ export class Scene {
     this.homePoint = point;
     this.force = true;
   }
-  // Points [north, east, altitude, time]. The same array again means nothing changed.
-  setTrail(points) {
-    if (points === this.trail) return;
+  // Points [north, east, altitude, time]. The same array again means nothing changed. A path still being
+  // flown is drawn on to the aircraft itself, which is shown where it is now: a little ahead of its last fix.
+  setTrail(points, flying = false) {
+    if (points === this.trail && flying === this.trailFlying) return;
     this.trail = points;
+    this.trailFlying = flying;
     this.force = true;
   }
 
@@ -716,6 +719,12 @@ export class Scene {
       // Its shadow is the same point h metres further down, which is one column of camR.
       ground.push([c[0] + camR[6] * h, c[1] + camR[7] * h, c[2] + camR[8] * h]);
       prev = p;
+    }
+    // Between fixes the aircraft is carried forward with its speed, and the path would stop short of it.
+    if (this.trailFlying && prev && this.posTarget) {
+      const c = toCam(this.n, this.e, -this.alt);
+      sky.push(c[0] * c[0] + c[1] * c[1] + c[2] * c[2] < near ? null : c);
+      ground.push([c[0] + camR[6] * this.alt, c[1] + camR[7] * this.alt, c[2] + camR[8] * this.alt]);
     }
     ctx.beginPath();
     traceSmooth(ctx, ground, at);

@@ -863,7 +863,7 @@ function connect() {
 // Coming back to this page can mean a new connection, and with nobody watching the server will have
 // let go of what it knew. Starting from nothing would blank the map and the readings and then bring them
 // back in pieces, so what was on screen stays, in the colours of old data, until new values replace it.
-const NOT_CARRIED = new Set(['link', 'age', 'old', 'exec', 'viewers', 'avail', 'cmds', 'rx', 'rates', 'loss', 'rtt', 'target', 'nav', 'armed_at', 'plan_busy', 'pending', 'seq', 'baud', 'cells']);
+const NOT_CARRIED = new Set(['link', 'age', 'old', 'exec', 'viewers', 'avail', 'cmds', 'rx', 'rates', 'loss', 'rtt', 'target', 'nav', 'armed_at', 'plan_busy', 'pending', 'asked_speed', 'seq', 'baud', 'cells']);
 const CARRIED_LIMIT_MS = 10000;     // once linked, whatever has not come back by then is no longer so
 
 function carryOver(before, fresh) {

@@ -181,15 +181,18 @@ class Telemetry:
 
     async def _acknowledged(self, command, send, timeout):
         future = asyncio.get_running_loop().create_future()
-        self.acks[command] = future
+        # Two of the same command can be waiting at once, such as a disarm and then a kill: the flight
+        # controller answers them in the order they went, so each reply belongs to the oldest still waiting.
+        waiting = self.acks.setdefault(command, [])
+        waiting.append(future)
         send()
         try:
             return await asyncio.wait_for(future, timeout)
         except TimeoutError:
             return None
         finally:
-            if self.acks.get(command) is future:
-                del self.acks[command]
+            if future in waiting:
+                waiting.remove(future)
 
     async def command(self, command, *params, timeout=3.0):
         """Sends COMMAND_LONG once. Returns the MAV_RESULT, or None with no reply."""
@@ -217,6 +220,20 @@ class Telemetry:
     def ask_for(self, msg_id):
         """Fetches one copy of a message now, rather than at its next turn."""
         self.mav.command_long_send(*self.target, L.MAV_CMD_REQUEST_MESSAGE, 0, msg_id, 0, 0, 0, 0, 0, 0)
+
+    async def destination(self, wait=0.8):
+        """(lat, lon) of where the flight controller says at this moment that it is flying to, or None if
+        it does not say. ArduCopter reports a destination only while it has one, so no answer means it is
+        going nowhere. What it said earlier is not trusted: a change of mode ends a destination without
+        a word, and the last one heard would still be on record."""
+        asked = time.monotonic()
+        self.ask_for(L.MAVLINK_MSG_ID_POSITION_TARGET_GLOBAL_INT)
+        while time.monotonic() - asked < wait:
+            if self.seen.get("POSITION_TARGET_GLOBAL_INT", 0) >= asked:
+                target = self.state.get("target")
+                return tuple(target[:2]) if target else None
+            await asyncio.sleep(0.05)
+        return None
 
     def listen(self):
         """What the flight controller says from now on, which is how it explains a refusal."""
@@ -529,6 +546,10 @@ class Telemetry:
         elif self.state.get("armed") is False:
             self._set("armed_at", round(time.time()))      # only an arming we saw happen
         self._set("armed", armed)
+        if m.custom_mode != self.state.get("mode"):
+            # Where it was going belonged to the mode it has left: the next report says where it goes now.
+            self._set("target", None)
+            self.seen.pop("POSITION_TARGET_GLOBAL_INT", None)
         self._set("mode", m.custom_mode)
         self._set("vehicle", m.type)
         self._set("sys", m.system_status)
@@ -712,9 +733,11 @@ class Telemetry:
             self._asked_at = None
             self._rtt = rtt if self._rtt is None else self._rtt * .8 + rtt * .2
             self._set("rtt", round(self._rtt))
-        future = self.acks.get(m.command)
-        if future and not future.done() and m.result != L.MAV_RESULT_IN_PROGRESS:
-            future.set_result(m.result)
+        waiting = self.acks.get(m.command)
+        if waiting and m.result != L.MAV_RESULT_IN_PROGRESS:
+            future = waiting.pop(0)
+            if not future.done():       # one that has just timed out is still listed for a moment: its late answer is dropped
+                future.set_result(m.result)
 
     def _on_statustext(self, m):
         text = m.text.rstrip("\x00").strip()

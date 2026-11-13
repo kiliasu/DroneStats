@@ -224,16 +224,16 @@ server: `/api/exec/run` runs what it is given.
 | --- | --- | --- |
 | `arm`, `disarm` | Motors on or off | Disarm: the flight controller says at that moment that it is on the ground |
 | `mode` | Stabilize, Alt Hold, Loiter, PosHold, Guided, Auto, Circle, Brake, RTL, Smart RTL, Land | Position for the modes that fly on it, home for RTL, a mission for Auto. Away from the ground, a working transmitter with its throttle stick off the bottom for those whose height follows it: Stabilize, Alt Hold, Loiter, PosHold, Circle |
-| `takeoff` | Climb to a height | Guided, armed, on the ground, with a position |
-| `goto` | Fly to a point within 1 km, switching to Guided first if asked | Armed, in the air, with a position |
-| `land_at`, `land_cancel` | Fly to a point and land on arrival, or call that off | As `goto` |
-| `altitude` | Change height, keeping the destination | Guided, armed, in the air, with a position |
-| `speed`, `yaw`, `pause`, `resume` | In flight | Guided or Auto, armed |
+| `takeoff` | Climb straight up to a height above home | Guided, armed, on the ground, with a position, and a height above where it is now |
+| `goto` | Fly in a straight line to a point within 1 km and a height above home, switching to Guided first if asked | Armed, in the air, with a position |
+| `land_at`, `land_cancel` | Fly to a point and land on arrival, or call that off. The landing is given up if execution closes first | As `goto` |
+| `altitude` | Change height, keeping the destination the flight controller has at that moment | Guided, armed, in the air, with a position |
+| `speed`, `yaw`, `pause`, `resume` | In flight. A speed asked for in Guided holds until it leaves Guided, and a new place to fly to ends a pause | Guided or Auto, armed |
 | `mission_start`, `mission_item` | Start the stored mission, or choose its next item | A mission is stored. Start: armed |
 | `plan_upload`, `plan_clear` | Replace or erase the mission, fence or rally points | Disarmed |
-| `fence_enable` | Turn the fence on or off | Always |
+| `fence_enable` | Turn the fence on or off | On: not in the air with the aircraft already outside it |
 | `set_home`, `param_set` | Make the present position or a given place home, or write one of a few flight limits | Disarmed |
-| `calibrate`, `motor_test` | Gyros, barometer, level; spin one motor at up to 30% for up to 5 s | Disarmed, on the ground |
+| `calibrate`, `motor_test` | Gyros, barometer, level; spin one motor, by its number on a quad X, at up to 30% for up to 5 s | Disarmed, on the ground. Motor test: a quad X |
 | `reboot` | Restart the flight controller | Disarmed |
 | `kill` | Stop the motors at once, even in the air | Armed |
 
@@ -247,6 +247,33 @@ what is really there on the page. Heights in a plan must be above home.
 
 Marks placed on the map are not commands: `POST /api/marks` changes them without execution, every viewer
 sees them, and they are kept in the service's state directory.
+
+### How the flight controller flies them
+
+Read from the ArduCopter 4.7.1 source and then flown in its simulator by `tools/sitl_check.py`, so that
+what a button does is what it says:
+
+- Every height is above home, not above the ground under the aircraft. `takeoff` to 5 m on ground that
+  stands 6 m above home is refused, by the server with the reason and by the flight controller without.
+- `goto`, `land_at` and `altitude` fly one straight line to the place and height asked for. Going down or
+  up on the way, the aircraft does both at once and arrives at both together, slowed across so that the
+  climb or descent stays within `WP_SPD_UP` or `WP_SPD_DN`; it does not change height first and then
+  fly level. The preview draws that line and counts the slower of the two.
+- Guided keeps a pause across a new destination, and starts its first destination after a takeoff or a
+  change of mode at `WP_SPD` again, whatever speed was asked for. Left alone, a `goto` after a `pause`
+  would be accepted and not flown, and one after `speed` would fly faster than asked. So after each new
+  destination the server ends the pause and sends the speed again. It forgets the speed when the
+  aircraft leaves Guided, as the flight controller does.
+- `altitude` asks the flight controller where it is going at that moment. What it reported a few
+  seconds earlier may be a mission's waypoint or the way home, from a mode it has since left.
+- The motor test takes a place in the order the test goes round in, clockwise from the front right, not
+  a motor's number. The server sends the place of the motor asked for, so that motor 2 turns the motor
+  the page calls 2. It knows this only for a quad X and refuses any other frame.
+- A landing on arrival is the server's doing: it watches the aircraft arrive and then changes the mode
+  to Land. It needs a page holding execution for that, and gives the landing up if execution closes,
+  the mode changes or ten minutes pass: the aircraft then holds in Guided at the place.
+- `set_home` at a place on the map keeps the altitude home already has, since the page does not know
+  the height of the ground there. Heights stay measured from the old home's level.
 
 ## The page
 

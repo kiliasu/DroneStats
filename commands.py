@@ -47,6 +47,17 @@ FORCE_DISARM = 21196    # ArduPilot's magic number for disarming regardless of s
 
 RC_BIT = L.MAV_SYS_STATUS_SENSOR_RC_RECEIVER
 FENCE_BIT = L.MAV_SYS_STATUS_GEOFENCE
+FENCE_ALT_MAX, FENCE_CIRCLE, FENCE_POLYGON = 1, 2, 4    # bits of FENCE_TYPE
+
+# The motor test takes a place in the order the test goes round in, not a motor's number. On a quad X
+# that order is clockwise from the front right, which is motors 1, 4, 2, 3 as ArduCopter numbers them
+# and as the page labels them (AP_MotorsMatrix, MOTOR_FRAME_TYPE_X). For any other frame the order is
+# not known here, so no motor is spun.
+QUAD_X = (1, 1)     # FRAME_CLASS, FRAME_TYPE
+QUAD_X_TEST_ORDER = {1: 1, 2: 3, 3: 4, 4: 2}
+
+# The actions that give ArduCopter's Guided mode a new destination.
+REPOSITIONS = ("goto", "land_at", "altitude")
 
 # Settings the panel may write, with the range it accepts. Names and units are those of ArduCopter
 # 4.7.1, which moved several from centimetres to metres and renamed them. The ranges are narrower
@@ -91,6 +102,7 @@ class Facts:
         self.in_air = landed in (L.MAV_LANDED_STATE_IN_AIR, L.MAV_LANDED_STATE_TAKEOFF, L.MAV_LANDED_STATE_LANDING)
         pos = s.get("pos")
         self.place = tuple(pos[:2]) if pos and pos[0] is not None and t.age("GLOBAL_POSITION_INT") < POSITION_REPORT_S else None
+        self.height = pos[3] if self.place else None       # above home
         ekf = s.get("ekf")
         self.position = (self.place is not None and ekf is not None and t.age("EKF_STATUS_REPORT") < ESTIMATOR_REPORT_S
                          and bool(ekf["flags"] & L.ESTIMATOR_POS_HORIZ_ABS) and not ekf["flags"] & L.ESTIMATOR_CONST_POS_MODE)
@@ -99,6 +111,9 @@ class Facts:
         self.rc = bool(sens and sens[0] & RC_BIT and sens[2] & RC_BIT)
         self.stick_low = _stick_low(t)
         self.waypoints = max(t.plans.waypoints(), (s.get("mission") or (0, 0))[1])
+        params = s.get("params") or {}
+        self.frame = (params.get("FRAME_CLASS"), params.get("FRAME_TYPE"))
+        self.outside_fence = _outside_fence(self.place, self.height, self.home, params, t.plans.entries["fence"]["items"])
 
 
 # ---- Rules: each returns why not, or None ----------------------------------------
@@ -143,6 +158,65 @@ def _metres(a, b):
     return math.hypot(north, east)
 
 
+def _inside_polygon(place, points):
+    lat, lon = place
+    inside = False
+    for (ay, ax), (by, bx) in zip(points, points[-1:] + points[:-1]):
+        if (ay > lat) != (by > lat) and lon < (bx - ax) * (lat - ay) / (by - ay) + ax:
+            inside = not inside
+    return inside
+
+
+def _outside_fence(place, height, home, params, items):
+    """Whether the aircraft is outside what its fence would allow were it on, as far as can be told.
+    What is not known is left out: the flight controller has the last word."""
+    if place is None:
+        return False
+    types = int(params.get("FENCE_TYPE") or 0)
+    if types & FENCE_ALT_MAX and height is not None and params.get("FENCE_ALT_MAX") and height > params["FENCE_ALT_MAX"]:
+        return True
+    if types & FENCE_CIRCLE and home and params.get("FENCE_RADIUS") and _metres(home[:2], place) > params["FENCE_RADIUS"]:
+        return True
+    if not types & FENCE_POLYGON:
+        return False
+    keep_in, inside_one, index = False, False, 0
+    while index < len(items):
+        item = items[index]
+        command, count = item.get("cmd"), int(item["p"][0] or 0) if item.get("p") else 0
+        if command in (plans.FENCE_POLY_IN, plans.FENCE_POLY_OUT) and count >= 3:
+            points = [(vertex["lat"], vertex["lon"]) for vertex in items[index:index + count]]
+            index += count
+            if len(points) < count or any(None in point for point in points):
+                continue
+            within = _inside_polygon(place, points)
+            if command == plans.FENCE_POLY_OUT and within:
+                return True
+            if command == plans.FENCE_POLY_IN:
+                keep_in, inside_one = True, inside_one or within
+            continue
+        if command in (plans.FENCE_CIRCLE_IN, plans.FENCE_CIRCLE_OUT) and item.get("lat") is not None and count > 0:
+            within = _metres((item["lat"], item["lon"]), place) <= item["p"][0]
+            if within != (command == plans.FENCE_CIRCLE_IN):
+                return True
+        index += 1
+    return keep_in and not inside_one
+
+
+def _takeoff_check(f, p):
+    # ArduCopter takes the height as above home and refuses, without saying why, one that is not above
+    # where the aircraft already is.
+    return "too_low" if f.height is not None and p["alt"] <= f.height else None
+
+
+def _fence_check(f, p):
+    # In the air, a fence turned on round an aircraft already outside it sets off its action at once.
+    return "outside_fence" if p["on"] and f.armed and not f.on_ground and f.outside_fence else None
+
+
+def _motor_check(f, p):
+    return None if f.frame == QUAD_X else "unknown_frame"
+
+
 def _goto_check(f, p):
     if f.mode != GUIDED and not p.get("change_mode", True):
         return "not_guided"
@@ -173,11 +247,12 @@ def _param_check(f, p):
 
 # ---- Sending ----------------------------------------------------------------------
 
-def _guided_alt(t, p):
-    """A new height, on the way to wherever it is going already."""
-    target = t.state.get("target")
-    lat, lon = target[:2] if target else t.state["pos"][:2]
-    return t.command_at(L.MAV_CMD_DO_REPOSITION, lat, lon, p["alt"], -1, 0, 0, math.nan)
+async def _guided_alt(t, p):
+    """A new height, on the way to wherever it is going at this moment, or where it is if it is going
+    nowhere. The flight controller is asked now: what it said a few seconds ago may be the waypoint of a
+    mission or a return it has since left, and the aircraft would set off for that."""
+    lat, lon = await t.destination() or t.state["pos"][:2]
+    return await t.command_at(L.MAV_CMD_DO_REPOSITION, lat, lon, p["alt"], -1, 0, 0, math.nan)
 
 
 CALIBRATIONS = {"gyro": (1, 0, 0, 0, 0, 0, 0), "baro": (0, 0, 1, 0, 0, 0, 0), "level": (0, 0, 0, 0, 2, 0, 0)}
@@ -284,14 +359,15 @@ _ACTIONS = [
            settled=lambda s, p: s.get("mode") == p["mode"]),
     Action("takeoff", "flight", CAUTION, "Climb straight up to a height above home. Needs Guided mode, armed, on the ground.",
            lambda t, p: t.command(L.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, p["alt"]),
-           params={"alt": _num(1, MAX_ALT_M, "m", default=5)}, state=_all(_armed, _guided, _on_ground, _position)),
+           params={"alt": _num(1, MAX_ALT_M, "m", default=5)}, state=_all(_armed, _guided, _on_ground, _position),
+           check=_takeoff_check),
 
     Action("goto", "guided", CAUTION, "Fly to a position at a height above home, in the air. Unless change_mode is true this needs Guided mode already.",
            lambda t, p: _reposition(t, p, p["change_mode"]),
            params={"lat": _num(-90, 90, "deg"), "lon": _num(-180, 180, "deg"), "alt": _num(2, MAX_ALT_M, "m"),
                    "change_mode": {"type": "boolean", "default": False}},
            state=_all(_armed, _in_air, _position), check=_goto_check),
-    Action("land_at", "guided", CAUTION, "Fly to a position, switching to Guided, and land when there. Any other command that changes where it goes cancels the landing.",
+    Action("land_at", "guided", CAUTION, "Fly to a position, switching to Guided, and land when there. Any other command that changes where it goes cancels the landing, and so does execution closing.",
            lambda t, p: _reposition(t, p, True),
            params={"lat": _num(-90, 90, "deg"), "lon": _num(-180, 180, "deg"), "alt": _num(2, MAX_ALT_M, "m")},
            state=_all(_armed, _in_air, _position), check=_goto_check),
@@ -299,14 +375,14 @@ _ACTIONS = [
            lambda t, p: _nothing(), keeps_pending=False),
     Action("altitude", "guided", CAUTION, "Change the height above home, keeping the present destination. Needs Guided mode, in the air.",
            _guided_alt, params={"alt": _num(2, MAX_ALT_M, "m")}, state=_all(_armed, _guided, _in_air, _position)),
-    Action("speed", "guided", ROUTINE, "Set the horizontal speed in Guided or Auto.",
+    Action("speed", "guided", ROUTINE, "Set the horizontal speed in Guided or Auto. In Guided it holds until the aircraft leaves that mode.",
            lambda t, p: t.command(L.MAV_CMD_DO_CHANGE_SPEED, 1, p["speed"], -1),
            params={"speed": _num(.5, 20, "m/s", default=5)}, state=_all(_armed, _steered), keeps_pending=True),
     Action("yaw", "guided", ROUTINE, "Turn to a compass heading, in Guided or Auto.",
            lambda t, p: t.command(L.MAV_CMD_CONDITION_YAW, p["heading"], p["rate"], 0, 0),
            params={"heading": _num(0, 360, "deg"), "rate": _num(1, 90, "deg/s", default=30)},
            state=_all(_armed, _in_air, _steered), keeps_pending=True),
-    Action("pause", "guided", ROUTINE, "Hold position on the way to the next point, in Guided or Auto.",
+    Action("pause", "guided", ROUTINE, "Hold position on the way to the next point, in Guided or Auto. A new place to fly to in Guided ends the pause.",
            lambda t, p: t.command(L.MAV_CMD_DO_PAUSE_CONTINUE, 0), state=_all(_armed, _in_air, _steered)),
     Action("resume", "guided", ROUTINE, "Carry on after a pause.",
            lambda t, p: t.command(L.MAV_CMD_DO_PAUSE_CONTINUE, 1), state=_all(_armed, _in_air, _steered)),
@@ -325,6 +401,7 @@ _ACTIONS = [
 
     Action("fence_enable", "safety", CAUTION, "Turn the geofence on or off.",
            lambda t, p: t.command(L.MAV_CMD_DO_FENCE_ENABLE, 1 if p["on"] else 0), params={"on": {"type": "boolean"}},
+           check=_fence_check,
            settled=lambda s, p: bool((s.get("sens") or (0, 0, 0))[1] & FENCE_BIT) == p["on"], keeps_pending=True),
     Action("set_home", "safety", CAUTION, "Make the present position, or a given one, home: where RTL returns to. Only while disarmed.",
            _set_home, params={"lat": _num(-90, 90, "deg", default=None), "lon": _num(-180, 180, "deg", default=None)},
@@ -336,11 +413,12 @@ _ACTIONS = [
     Action("calibrate", "setup", DANGER, "Calibrate the gyros, barometer or level. The aircraft must stay still.",
            lambda t, p: t.command(L.MAV_CMD_PREFLIGHT_CALIBRATION, *CALIBRATIONS[p["what"]], timeout=30),
            params={"what": {"type": "string", "enum": list(CALIBRATIONS)}}, state=_all(_disarmed, _on_ground), timeout_s=40),
-    Action("motor_test", "setup", DANGER, "Spin one motor briefly. Its propeller turns: take the propellers off first.",
-           lambda t, p: t.command(L.MAV_CMD_DO_MOTOR_TEST, p["motor"], L.MOTOR_TEST_THROTTLE_PERCENT, p["throttle"], p["seconds"], 0, 0),
+    Action("motor_test", "setup", DANGER, "Spin one motor of a quad X briefly, by its number. Its propeller turns: take the propellers off first.",
+           lambda t, p: t.command(L.MAV_CMD_DO_MOTOR_TEST, QUAD_X_TEST_ORDER[p["motor"]], L.MOTOR_TEST_THROTTLE_PERCENT,
+                                  p["throttle"], p["seconds"], 0, 0),
            params={"motor": {"type": "integer", "minimum": 1, "maximum": 4},
                    "throttle": _num(1, 30, "%", default=10), "seconds": _num(1, 5, "s", default=2)},
-           state=_all(_disarmed, _on_ground)),
+           state=_all(_disarmed, _on_ground), check=_motor_check),
     Action("reboot", "setup", DANGER, "Restart the flight controller. Only while disarmed.",
            lambda t, p: t.command(L.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, 1), state=_disarmed, hold_ms=2000),
 
@@ -416,6 +494,7 @@ class Commander:
         self.t = telemetry
         self.record = collections.deque(maxlen=LOG_KEPT)
         self.pending = None     # a landing to do on arrival: {"lat", "lon", "at"}
+        self.speed = None       # the speed asked for in Guided, which holds until the aircraft leaves that mode
 
     def availability(self):
         """Why each action cannot run now, leaving out those that can."""
@@ -449,23 +528,51 @@ class Commander:
             result = await action.send(self.t, params)
             if result != L.MAV_RESULT_ACCEPTED:
                 await asyncio.sleep(EXPLAIN_S)
-            elif action.name == "land_at":
+                return result, heard[-3:]
+            if action.name == "land_at":
                 self._set_pending({"lat": params["lat"], "lon": params["lon"], "at": time.monotonic()})
+            if action.name == "speed" and self.t.state.get("mode") == GUIDED:
+                self._set_speed(params["speed"])
+            if action.name in REPOSITIONS:
+                await self._carry_on()
             return result, heard[-3:]
         finally:
             self.t.stop_listening(heard)
+
+    async def _carry_on(self):
+        """What ArduCopter has to be told again once Guided has a new destination. A pause outlasts one,
+        so the aircraft would stay where it is with the command accepted. And the first destination after
+        a takeoff or a change of mode starts again from WP_SPD, whatever speed was asked for before it."""
+        if await self.t.command(L.MAV_CMD_DO_PAUSE_CONTINUE, 1) != L.MAV_RESULT_ACCEPTED:
+            self.t.say_to_listeners("Could not end a pause: if it does not move, press Resume")
+        if self.speed is not None and await self.t.command(L.MAV_CMD_DO_CHANGE_SPEED, 1, self.speed, -1) != L.MAV_RESULT_ACCEPTED:
+            self._set_speed(None)
+            self.t.say_to_listeners("The speed asked for earlier was not taken again: it flies at WP_SPD")
 
     def _set_pending(self, pending):
         self.pending = pending
         self.t.publish("pending", {"lat": pending["lat"], "lon": pending["lon"]} if pending else None)
 
+    def _set_speed(self, speed):
+        self.speed = speed
+        self.t.publish("asked_speed", speed)
+
+    def give_up_landing(self):
+        """Execution has closed, and with it the leave to send anything: a landing still to come is given
+        up. The aircraft stays in Guided at the place, as it does when anything else has changed."""
+        if self.pending:
+            self._set_pending(None)
+            self.note(ACTIONS["land_at"], {}, "cancelled")
+
     def tick(self):
         """Carries out a landing on arrival. It gives up rather than guess if anything has changed: the
         aircraft then just stays in Guided at the place, and the person can see that it has."""
+        s, now = self.t.state, time.monotonic()
+        if self.speed is not None and (not self.t.fresh() or s.get("armed") is False or s.get("mode") != GUIDED):
+            self._set_speed(None)       # ArduCopter forgets it on leaving Guided, and so does this
         p = self.pending
         if p is None:
             return
-        s, now = self.t.state, time.monotonic()
         waited = now - p["at"]
         if not self.t.fresh():
             if waited > PENDING_LIMIT_S:

@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -56,6 +57,68 @@ class Table(unittest.TestCase):
 
     def test_every_setting_that_can_be_written_is_also_read(self):
         self.assertLessEqual(set(commands.EDITABLE), set(tel.WANTED_PARAMS))
+
+    def test_a_motor_number_is_sent_as_its_place_in_the_test_order(self):
+        """The firmware's motor test takes a place in the order it goes round in. Both tables are from
+        AP_MotorsMatrix's quad X: the commands' by motor number, the pretend flight controller's by place."""
+        for motor, place in commands.QUAD_X_TEST_ORDER.items():
+            self.assertEqual(fake_fc.MOTOR_AT_TEST_PLACE[place], motor)
+        self.assertEqual(sorted(commands.QUAD_X_TEST_ORDER.values()), [1, 2, 3, 4])
+
+    def test_takeoff_must_be_to_above_where_it_is(self):
+        on_a_rise = SimpleNamespace(height=6.2)
+        self.assertEqual(commands._takeoff_check(on_a_rise, {"alt": 5}), "too_low")
+        self.assertIsNone(commands._takeoff_check(on_a_rise, {"alt": 8}))
+        self.assertIsNone(commands._takeoff_check(SimpleNamespace(height=.3), {"alt": 1}))
+        self.assertIsNone(commands._takeoff_check(SimpleNamespace(height=None), {"alt": 5}))    # not known: the flight controller decides
+
+    def test_what_counts_as_outside_the_fence(self):
+        home = (*fake_fc.HOME, 584)
+        at = fake_fc._at
+        poly = [{"cmd": plans.FENCE_POLY_IN, "lat": lat, "lon": lon, "p": [4, 0, 0, 0]}
+                for lat, lon in (at(-50, -50), at(50, -50), at(50, 50), at(-50, 50))]
+        keep_out = [{"cmd": plans.FENCE_CIRCLE_OUT, "lat": at(20, 20)[0], "lon": at(20, 20)[1], "p": [10, 0, 0, 0]}]
+        outside = commands._outside_fence
+        self.assertFalse(outside(at(10, 10), 300, home, {}, poly))                          # no fence of any kind set
+        self.assertTrue(outside(at(0, 0), 61, home, {"FENCE_TYPE": 1, "FENCE_ALT_MAX": 60}, []))
+        self.assertFalse(outside(at(0, 0), 59, home, {"FENCE_TYPE": 1, "FENCE_ALT_MAX": 60}, []))
+        self.assertTrue(outside(at(0, 121), 10, home, {"FENCE_TYPE": 2, "FENCE_RADIUS": 120}, []))
+        self.assertFalse(outside(at(0, 119), 10, home, {"FENCE_TYPE": 2, "FENCE_RADIUS": 120}, []))
+        self.assertFalse(outside(at(0, 121), 10, None, {"FENCE_TYPE": 2, "FENCE_RADIUS": 120}, []))    # no home to measure from
+        self.assertFalse(outside(at(40, 40), 10, home, {"FENCE_TYPE": 4}, poly))
+        self.assertTrue(outside(at(60, 0), 10, home, {"FENCE_TYPE": 4}, poly))
+        self.assertTrue(outside(at(20, 20), 10, home, {"FENCE_TYPE": 4}, poly + keep_out))
+        self.assertFalse(outside(at(40, 40), 10, home, {"FENCE_TYPE": 4}, poly + keep_out))
+        self.assertFalse(outside(at(60, 0), 10, home, {"FENCE_TYPE": 3, "FENCE_ALT_MAX": 60, "FENCE_RADIUS": 120}, poly))   # polygons not in force
+        self.assertFalse(outside(None, None, home, {"FENCE_TYPE": 7, "FENCE_RADIUS": 1}, poly))
+
+
+class Replies(unittest.IsolatedAsyncioTestCase):
+    async def test_two_of_the_same_command_each_get_their_own_answer(self):
+        """A kill sent while a disarm is still waiting: the refusal belongs to the disarm."""
+        t = tel.Telemetry("127.0.0.1", 1)
+        command = L.MAV_CMD_COMPONENT_ARM_DISARM
+        first = asyncio.create_task(t._acknowledged(command, lambda: None, 1))
+        second = asyncio.create_task(t._acknowledged(command, lambda: None, 1))
+        await asyncio.sleep(0)
+        for result in (L.MAV_RESULT_FAILED, L.MAV_RESULT_ACCEPTED):
+            t._on_command_ack(L.MAVLink_command_ack_message(command, result, 0, 0, tel.SYSID, tel.COMPID))
+        self.assertEqual((await first, await second), (L.MAV_RESULT_FAILED, L.MAV_RESULT_ACCEPTED))
+        self.assertEqual(t.acks[command], [])
+
+    async def test_no_answer_leaves_nothing_waiting(self):
+        t = tel.Telemetry("127.0.0.1", 1)
+        self.assertIsNone(await t._acknowledged(L.MAV_CMD_DO_SET_MODE, lambda: None, .05))
+        self.assertEqual(t.acks[L.MAV_CMD_DO_SET_MODE], [])
+
+    async def test_an_answer_that_comes_as_the_wait_runs_out_is_dropped(self):
+        t = tel.Telemetry("127.0.0.1", 1)
+        command = L.MAV_CMD_DO_SET_MODE
+        gone = asyncio.get_running_loop().create_future()
+        gone.cancel()                       # timed out, and not yet taken off the list
+        t.acks[command] = [gone]
+        t._on_command_ack(L.MAVLink_command_ack_message(command, L.MAV_RESULT_ACCEPTED, 0, 0, tel.SYSID, tel.COMPID))
+        self.assertEqual(t.acks[command], [])
 
     def test_input_is_held_to_its_schema(self):
         takeoff = commands.ACTIONS["takeoff"]
@@ -402,6 +465,103 @@ class Commanding(Harness):
         await self.accepted(token, "mode", mode=commands.LOITER)
         await self.refused(token, "not_steered", "speed", speed=3)
 
+    async def test_a_new_place_ends_a_pause(self):
+        """ArduCopter keeps a pause across a new destination: it would accept it and not move."""
+        token = await self.known()
+        await self.airborne(token)
+        lat, lon = fake_fc._at(20, 0)
+        await self.accepted(token, "goto", lat=lat, lon=lon, alt=10)
+        await self.accepted(token, "pause")
+        self.assertTrue(self.vehicle.paused)
+        lat, lon = fake_fc._at(0, 20)
+        await self.accepted(token, "goto", lat=lat, lon=lon, alt=10)
+        self.assertFalse(self.vehicle.paused)
+        self.assertAlmostEqual(self.vehicle.guided[1], 20, delta=.1)
+        await self.accepted(token, "pause")
+        await self.accepted(token, "altitude", alt=15)
+        self.assertFalse(self.vehicle.paused)
+        await self.accepted(token, "pause")
+        await self.accepted(token, "land_at", lat=lat, lon=lon, alt=10)
+        self.assertFalse(self.vehicle.paused)
+
+    async def test_a_pause_that_cannot_be_ended_is_said(self):
+        token = await self.known()
+        await self.airborne(token)
+        lat, lon = fake_fc._at(20, 0)
+        with patch.object(tel.Telemetry, "command", side_effect=lambda *a, **k: asyncio.sleep(0, L.MAV_RESULT_FAILED)):
+            body = await self.accepted(token, "goto", lat=lat, lon=lon, alt=10)
+        self.assertTrue(any("Resume" in line for line in body["said"]), body)
+
+    async def test_a_speed_asked_for_in_guided_holds_for_the_next_place(self):
+        """The firmware starts its first destination after a takeoff from its usual speed again."""
+        token = await self.known()
+        await self.airborne(token)
+        await self.accepted(token, "speed", speed=3)
+        self.assertEqual(self.telemetry.state["asked_speed"], 3)
+        lat, lon = fake_fc._at(30, 0)
+        await self.accepted(token, "goto", lat=lat, lon=lon, alt=10)
+        self.assertEqual(self.vehicle.speed, 3)
+        await self.accepted(token, "speed", speed=4)
+        await self.accepted(token, "altitude", alt=12)
+        self.assertEqual(self.vehicle.speed, 4)
+        # It is forgotten on leaving Guided, as the firmware forgets it: the next time starts afresh.
+        await self.accepted(token, "mode", mode=commands.LOITER)
+        await self.until(lambda: self.telemetry.state.get("asked_speed") is None, what="the speed to be forgotten")
+        await self.accepted(token, "goto", lat=lat, lon=lon, alt=10, change_mode=True)
+        self.assertEqual(self.vehicle.speed, fake_fc.USUAL_SPEED)
+
+    async def test_a_speed_asked_for_in_auto_is_left_to_the_mission(self):
+        token = await self.known()
+        await self.airborne(token)
+        self.vehicle.mode = commands.AUTO
+        await self.until(lambda: self.telemetry.state.get("mode") == commands.AUTO, what="Auto")
+        await self.accepted(token, "speed", speed=3)
+        self.assertIsNone(self.telemetry.state.get("asked_speed"))
+
+    async def test_a_new_height_does_not_send_it_where_another_mode_was_going(self):
+        """A waypoint a mission was flying to stays on record for a few seconds after the mode changes."""
+        token = await self.known()
+        await self.airborne(token)
+        self.vehicle.plans[MISSION] = fake_fc.sample_plan()[MISSION]
+        self.vehicle.mode, self.vehicle.mission_running, self.vehicle.current = commands.AUTO, True, 2
+        await self.until(lambda: self.telemetry.state.get("mode") == commands.AUTO and self.telemetry.state.get("target"),
+                         what="the mission's waypoint to be reported")
+        await self.accepted(token, "mode", mode=commands.GUIDED)
+        self.assertIsNone(self.telemetry.state.get("target"))
+        await self.accepted(token, "altitude", alt=25)
+        v = self.vehicle
+        self.assertLess(math.hypot(v.guided[0] - v.north, v.guided[1] - v.east), 3)    # where it is, not the waypoint 40 m on
+        self.assertEqual(v.guided[2], 25)
+
+    async def test_a_landing_on_arrival_is_given_up_when_execution_is_turned_off(self):
+        token = await self.known()
+        await self.airborne(token, alt=8)
+        far = fake_fc._at(60, 0)
+        await self.accepted(token, "land_at", lat=far[0], lon=far[1], alt=8)
+        self.assertIsNotNone(self.server.commander.pending)
+        status, _ = await self.post("/api/exec/close", token=token)
+        self.assertEqual(status, 200)
+        await self.until(lambda: self.server.commander.pending is None, what="the landing to be given up")
+        self.assertIsNone(self.telemetry.state["pending"])
+        self.assertEqual(self.telemetry.state["cmds"][0][1:], ["land_at", {}, "cancelled"])
+        self.vehicle.north, self.vehicle.east = 60, 0       # it gets there all the same, and holds
+        await asyncio.sleep(.8)
+        self.assertEqual(self.vehicle.mode, commands.GUIDED)
+
+    async def test_a_landing_on_arrival_is_given_up_when_its_holder_leaves(self):
+        token = await self.known()
+        await self.airborne(token, alt=8)
+        far = fake_fc._at(60, 0)
+        await self.accepted(token, "land_at", lat=far[0], lon=far[1], alt=8)
+        self.owner_writer.close()
+        await self.until(lambda: self.server.commander.pending is None, what="the landing to be given up")
+        self.vehicle.north, self.vehicle.east = 60, 0
+        await asyncio.sleep(.8)
+        self.assertEqual(self.vehicle.mode, commands.GUIDED)
+        await self.linked()                                 # and someone looking in later does not set it off
+        await asyncio.sleep(.6)
+        self.assertEqual(self.vehicle.mode, commands.GUIDED)
+
     async def test_modes_are_refused_for_what_they_would_lack(self):
         token = await self.known()
         await self.refused(token, "no_mission", "mode", mode=commands.AUTO)
@@ -462,8 +622,10 @@ class Commanding(Harness):
         self.server.gate.last_run = 0
         status, body = await self.run_command(token, action="calibrate", what="compass")
         self.assertEqual((status, body["error"]), (409, "bad_param"))
+        await self.until(lambda: "FRAME_TYPE" in (self.telemetry.state.get("params") or {}), what="the frame to be known")
         await self.accepted(token, "motor_test", motor=2, throttle=15, seconds=2)
-        self.assertEqual(self.vehicle.motor_tests, [(2.0, 0.0, 15.0, 2.0)])
+        self.assertEqual(self.vehicle.motor_tests, [(2, 0.0, 15.0, 2.0)])       # the motor that turned
+        self.assertIn((L.MAV_CMD_DO_MOTOR_TEST, 3.0, 0.0), self.vehicle.commands)   # third in the order of the test
         for params in ({"motor": 5}, {"motor": 1, "throttle": 31}, {"motor": 1, "seconds": 6}, {"motor": 1.5}, {}):
             self.server.gate.last_run = 0
             status, body = await self.run_command(token, action="motor_test", **params)
@@ -473,6 +635,38 @@ class Commanding(Harness):
         await self.refused(token, "armed", "motor_test", motor=1)
         await self.refused(token, "armed", "calibrate", what="level")
         await self.refused(token, "armed", "set_home")
+
+    async def test_each_motor_number_turns_that_motor(self):
+        token = await self.known()
+        await self.until(lambda: "FRAME_TYPE" in (self.telemetry.state.get("params") or {}), what="the frame to be known")
+        for motor in (1, 2, 3, 4):
+            await self.accepted(token, "motor_test", motor=motor)
+        self.assertEqual([test[0] for test in self.vehicle.motor_tests], [1, 2, 3, 4])
+
+    async def test_no_motor_is_spun_on_a_frame_whose_numbering_is_not_known(self):
+        token = await self.known()
+        await self.refused(token, "unknown_frame", "motor_test", motor=1)       # before the frame has been read
+        await self.until(lambda: "FRAME_TYPE" in (self.telemetry.state.get("params") or {}), what="the frame to be known")
+        self.telemetry.params["FRAME_TYPE"] = 0.0       # a quad plus
+        self.telemetry._set("params", dict(self.telemetry.state["params"], FRAME_TYPE=0.0))
+        await self.refused(token, "unknown_frame", "motor_test", motor=1)
+        self.assertEqual(self.vehicle.motor_tests, [])
+
+    async def test_the_fence_is_not_turned_on_round_an_aircraft_outside_it(self):
+        self.vehicle.params.update(FENCE_TYPE=2, FENCE_RADIUS=30)       # a circle of 30 m round home
+        token = await self.known()
+        await self.until(lambda: "FENCE_RADIUS" in (self.telemetry.state.get("params") or {}) and self.telemetry.state.get("home"),
+                         what="the fence's size and home")
+        await self.airborne(token)
+        self.vehicle.north = 50
+        await self.until(lambda: commands.Facts(self.telemetry).outside_fence, what="it to be seen outside")
+        await self.refused(token, "outside_fence", "fence_enable", on=True)
+        self.assertFalse(self.vehicle.fence_on)
+        await self.accepted(token, "fence_enable", on=False)       # turning it off is never held back
+        self.vehicle.north = 10
+        await self.until(lambda: not commands.Facts(self.telemetry).outside_fence, what="it to be seen inside")
+        await self.accepted(token, "fence_enable", on=True)
+        self.assertTrue(self.vehicle.fence_on)
 
     async def test_fence_on_and_off_is_checked_against_the_telemetry(self):
         token = await self.known()

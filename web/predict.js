@@ -18,6 +18,8 @@ const SAMPLES = 16;             // points along each leg tested against the fenc
 
 const param = (name, otherwise) => store.S.params?.[name] ?? otherwise;
 const wpSpeed = () => param('WP_SPD', 10) || 10;
+// To a place in Guided it flies at the speed last asked for there, which the server keeps in force.
+const guidedSpeed = () => store.S.asked_speed || wpSpeed();
 
 const apart = (a, b) => Math.hypot((a.lat - b.lat) * 111320, (a.lon - b.lon) * 111320 * Math.cos(a.lat * Math.PI / 180));
 
@@ -184,14 +186,14 @@ export function predictFlight(action, params = {}) {
   const way = (() => {
     if (action === 'goto' || action === 'land_at') {
       const to = { lat: params.lat, lon: params.lon, alt: params.alt };
-      const there = legSeconds(start, to);
+      const there = legSeconds(start, to, guidedSpeed());
       if (action === 'goto') return flight([start, to], there);
       return flight([start, to, { ...to, alt: 0 }], there + landSeconds(params.alt), true);
     }
     if (action === 'altitude') {
       const target = S.target;
       const to = target ? { lat: target[0], lon: target[1], alt: params.alt } : { lat: start.lat, lon: start.lon, alt: params.alt };
-      return flight([start, to], legSeconds(start, to));
+      return flight([start, to], legSeconds(start, to, guidedSpeed()));
     }
     if (action === 'mission_start') return missionPath(start, current);
     if (action === 'mission_item') return S.mode === AUTO ? missionPath(start, params.seq) : null;

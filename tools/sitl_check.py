@@ -134,6 +134,45 @@ class Check:
         pos = self.s["pos"]
         return math.hypot((lat - pos[0]) * 111320, (lon - pos[1]) * 111320 * math.cos(math.radians(lat)))
 
+    def speed(self):
+        return (self.s.get("hud") or [0])[0] or 0
+
+    async def fastest(self, arrived, timeout, what):
+        """The greatest ground speed seen on the way to something."""
+        top, deadline = 0.0, time.monotonic() + timeout
+        while not arrived() and time.monotonic() < deadline:
+            top = max(top, self.speed())
+            await asyncio.sleep(.2)
+        if not arrived():
+            self.note(f"waiting for {what}", False, f"not within {timeout} s")
+        return top
+
+    async def off_the_line(self, start, end, arrived, timeout, what):
+        """How far, at most, it strayed from the straight line between two (lat, lon, height) on the way."""
+        def metres(p):
+            return ((p[0] - start[0]) * 111320, (p[1] - start[1]) * 111320 * math.cos(math.radians(start[0])), p[2] - start[2])
+        b = metres(end)
+        length = sum(x * x for x in b)
+        worst, deadline = 0.0, time.monotonic() + timeout
+        while not arrived() and time.monotonic() < deadline:
+            pos = self.s["pos"]
+            a = metres((pos[0], pos[1], pos[3]))
+            along = max(0, min(1, sum(x * y for x, y in zip(a, b)) / length))
+            worst = max(worst, math.dist(a, [x * along for x in b]))
+            await asyncio.sleep(.2)
+        if not arrived():
+            self.note(f"waiting for {what}", False, f"not within {timeout} s")
+        return worst
+
+    async def motor_that_turns(self, seconds):
+        """The number of the motor with the most output over the next while, or None if none has any."""
+        most, deadline = [0, 0, 0, 0], time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self.telemetry.ask_for(L.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW)
+            await asyncio.sleep(.2)
+            most = [max(a, b or 0) for a, b in zip(most, self.s.get("motors") or most)]
+        return most.index(max(most)) + 1 if max(most) > 0 else None
+
     # --- the steps ----------------------------------------------------------
 
     async def ready(self):
@@ -248,26 +287,42 @@ class Check:
         await self.act("takeoff", expect="not_on_ground", alt=10)
         far = self.offset(5000, 0)
         await self.act("goto", expect="too_far", lat=far[0], lon=far[1], alt=10)
+        # The firmware starts Guided's first place after a takeoff from WP_SPD again: the server sends
+        # the speed asked for once more, and this is what shows that it holds.
+        await self.act("speed", label="a speed, before it has been sent anywhere", speed=3)
         there = self.offset(40, 0)
         await self.act("goto", lat=there[0], lon=there[1], alt=12)
         await self.until(lambda: self.s.get("target"), 8, "the target to be reported")
         self.note("target is where it was sent", self.s.get("target") and abs(self.s["target"][0] - there[0]) < 1e-4, str(self.s.get("target")))
         self.note("target's frame is known", self.s.get("target") and self.s["target"][3] in (0, 3, 5, 6), str(self.s.get("target")))
-        await self.until(lambda: self.metres_to(*there) < 3, 60, "arriving 40 m north")
-        await self.act("altitude", alt=15)
-        await self.until(lambda: self.s["pos"][3] > 14, 30, "climbing to 15 m")
+        fastest = await self.fastest(lambda: self.metres_to(*there) < 3, 60, "arriving 40 m north")
+        self.note("it flew there at the speed asked for", 2 < fastest < 3.8, f"{fastest:.1f} m/s at most, WP_SPD is {self.telemetry.params.get('WP_SPD')}")
+        await self.act("altitude", alt=30)
+        await self.until(lambda: self.s["pos"][3] > 29, 40, "climbing to 30 m")
         self.note("a new height kept the position", self.metres_to(*there) < 5, f"{self.metres_to(*there):.1f} m away")
-        await self.act("speed", speed=3)
+        # From a high place to a low one: one straight line, not down first and then across.
+        low = self.offset(40, 60)
+        start = (*self.s["pos"][:2], self.s["pos"][3])
+        await self.act("goto", label="fly down to a place", lat=low[0], lon=low[1], alt=12)
+        strayed = await self.off_the_line(start, (*low, 12), lambda: self.metres_to(*low) < 3 and abs(self.s["pos"][3] - 12) < 1.5, 90,
+                                          "arriving at the lower place")
+        self.note("it flew one straight line down to it", strayed < 2.5, f"{strayed:.1f} m off the line at most")
         await self.act("yaw", heading=90)
         await self.until(lambda: abs(((self.s["hud"][3] - 90 + 180) % 360) - 180) < 10, 30, "turning to 90 degrees")
-        away = self.offset(40, 60)
-        await self.act("goto", lat=away[0], lon=away[1], alt=15)
-        await self.until(lambda: self.s["hud"][0] > 1, 15, "moving")
+        away = self.offset(0, 60)
+        await self.act("goto", lat=away[0], lon=away[1], alt=12)
+        await self.until(lambda: self.speed() > 1, 15, "moving")
         await self.act("pause")
-        stopped = await self.until(lambda: self.s["hud"][0] < .3, 15, "stopping after pause")
+        stopped = await self.until(lambda: self.speed() < .3, 15, "stopping after pause")
         self.note("pause stopped it", stopped)
         await self.act("resume")
-        await self.until(lambda: self.s["hud"][0] > 1, 15, "moving again after resume")
+        await self.until(lambda: self.speed() > 1, 15, "moving again after resume")
+        # The firmware keeps a pause across a new place, accepting it and not moving: the server ends it.
+        await self.act("pause", label="pause again")
+        await self.until(lambda: self.speed() < .3, 15, "stopping after the second pause")
+        other = self.offset(0, 20)
+        await self.act("goto", label="a new place while paused", lat=other[0], lon=other[1], alt=12)
+        self.note("a new place ended the pause", await self.until(lambda: self.speed() > 1, 15, "moving to the new place with no resume"))
         await self.act("mode", mode=BRAKE)
         await self.act("mode", mode=GUIDED)
         await self.stick_modes()
@@ -285,6 +340,16 @@ class Check:
         await self.act("pause", label="pause in Auto")
         await self.until(lambda: self.s["hud"][0] < .3, 15, "stopping in Auto")
         await self.act("resume", label="resume in Auto")
+        await self.until(lambda: self.speed() > 1, 15, "moving again in Auto")
+        # Leaving the mission for Guided, a new height must not send it on to the mission's waypoint,
+        # which is still the last destination it reported.
+        await self.act("mode", mode=GUIDED)
+        left = self.s["pos"][:2]
+        await self.act("altitude", label="a new height just after leaving the mission", alt=20)
+        await asyncio.sleep(6)
+        self.note("it stayed where it left the mission", self.metres_to(*left) < 15 and self.speed() < 1,
+                  f"{self.metres_to(*left):.1f} m on, at {self.speed()} m/s")
+        await self.act("mission_start", label="back to the mission")
         self.say("    flying home through the rest of the mission")
         landed = await self.until(lambda: self.s.get("armed") is False, 240, "the mission to finish and land")
         self.note("mission ended on the ground", landed)
@@ -367,8 +432,13 @@ class Check:
         await self.act("calibrate", what="baro")
         await self.act("calibrate", what="gyro")
         await self.act("calibrate", what="level")
-        await self.act("motor_test", motor=1, throttle=10, seconds=1)
-        await asyncio.sleep(2)
+        # The firmware takes a place in the order of its test, and the server turns a motor's number into
+        # that: what shows it is the output that then rises.
+        for motor in (1, 2, 3, 4):
+            await self.act("motor_test", motor=motor, throttle=10, seconds=2)
+            turned = await self.motor_that_turns(2.5)
+            self.note(f"motor {motor} is the one that turned", turned == motor, f"motor {turned}")
+            await asyncio.sleep(1)
         for kind in ("mission", "fence", "rally"):
             await self.act("plan_clear", label=f"erase {kind}", kind=kind)
         stored = self.s["plan"]

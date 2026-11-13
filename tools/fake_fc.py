@@ -35,6 +35,10 @@ DRAIN_V_PER_S = 0.0015
 MISSION, FENCE, RALLY = L.MAV_MISSION_TYPE_MISSION, L.MAV_MISSION_TYPE_FENCE, L.MAV_MISSION_TYPE_RALLY
 GUIDED, AUTO, RTL, LAND, BRAKE = 4, 3, 6, 9, 17
 REACHED_M = 1.0
+USUAL_SPEED = 5.0           # what it flies at until told otherwise, as WP_SPD is to the firmware
+# The motor test takes a place in the order the test goes round in, and this is the motor at each place
+# on a quad X: clockwise from the front right (AP_MotorsMatrix, MOTOR_FRAME_TYPE_X).
+MOTOR_AT_TEST_PLACE = {1: 1, 2: 4, 3: 2, 4: 3}
 CAPABILITIES = (L.MAV_PROTOCOL_CAPABILITY_MISSION_INT | L.MAV_PROTOCOL_CAPABILITY_COMMAND_INT | L.MAV_PROTOCOL_CAPABILITY_MISSION_FENCE
                 | L.MAV_PROTOCOL_CAPABILITY_MISSION_RALLY | L.MAV_PROTOCOL_CAPABILITY_MAVLINK2)
 FLIGHT_MESSAGES = ("EKF3 IMU0 is using GPS", "GPS 1: detected u-blox", "Vibration compensation ON",
@@ -114,7 +118,8 @@ class Vehicle:
         self.paused = False
         self.climb_to = None                    # a height asked for by a takeoff
         self.guided = None                      # (north, east, height) asked for in Guided
-        self.speed = 5.0
+        self.guided_flying_to = False           # Guided is steering to a place, not climbing out or holding
+        self.speed = USUAL_SPEED
         self.heading = None                     # a heading asked for
         self.vn = self.ve = 0.0
         self.consumed = 0.0
@@ -130,6 +135,18 @@ class Vehicle:
     @property
     def flying(self):
         return self.armed and self.alt > 0.2
+
+    def enter(self, mode):
+        """A change of mode, which starts the new one afresh: no pause, and in Guided no place to go to."""
+        self.mode = mode
+        if mode != AUTO:
+            self.mission_running = False
+        self.paused = False
+        self.guided_flying_to = False
+        if mode == GUIDED:
+            self.guided = None
+        if mode not in (GUIDED, AUTO):
+            self.climb_to = None
 
     def destination(self):
         """Where it is flying to on its own, as (north, east, height), or None."""
@@ -357,9 +374,13 @@ class Connection:
                 if v.mode != GUIDED and not int(m.param2) & 1:
                     result = L.MAV_RESULT_DENIED
                 else:
-                    if int(m.param2) & 1:
-                        v.mode = GUIDED
-                        v.mission_running = False
+                    if v.mode != GUIDED:
+                        v.enter(GUIDED)
+                    if not v.guided_flying_to:
+                        # Starting to steer to a place sets the speed back to the usual one. Once steering,
+                        # another place keeps the speed, and keeps a pause too: it does not move until resumed.
+                        v.guided_flying_to = True
+                        v.speed = USUAL_SPEED
                     north = (m.x / 1e7 - HOME[0]) * 111320
                     east = (m.y / 1e7 - HOME[1]) * 111320 * math.cos(math.radians(HOME[0]))
                     v.guided = (north, east, m.z)
@@ -403,19 +424,16 @@ class Connection:
                     v.armed = m.param1 == 1
                     self.mav.statustext_send(L.MAV_SEVERITY_INFO, b"Arming motors" if v.armed else b"Disarming motors")
             elif m.command == L.MAV_CMD_DO_SET_MODE:
-                v.mode = int(m.param2)
-                if v.mode != AUTO:
-                    v.mission_running = False
-                v.paused = False
-                v.guided = None if v.mode == GUIDED else v.guided
-                v.climb_to = None if v.mode not in (GUIDED, AUTO) else v.climb_to
+                if int(m.param2) != v.mode:     # the mode it is already in is left as it is
+                    v.enter(int(m.param2))
             elif m.command == L.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN:
                 self.boot = time.monotonic()
             elif m.command == L.MAV_CMD_NAV_TAKEOFF:
-                if not v.armed or v.mode != GUIDED or v.flying:
+                if not v.armed or v.mode != GUIDED or v.flying or m.param7 <= v.alt:
                     result = L.MAV_RESULT_FAILED
                 else:
                     v.climb_to = m.param7
+                    v.guided_flying_to = False
             elif m.command == L.MAV_CMD_DO_CHANGE_SPEED:
                 v.speed = m.param2
             elif m.command == L.MAV_CMD_CONDITION_YAW:
@@ -445,8 +463,10 @@ class Connection:
             elif m.command == L.MAV_CMD_DO_MOTOR_TEST:
                 if v.armed:
                     result = L.MAV_RESULT_FAILED
+                elif int(m.param1) not in MOTOR_AT_TEST_PLACE:
+                    result = L.MAV_RESULT_FAILED
                 else:
-                    v.motor_tests.append((m.param1, m.param2, m.param3, m.param4))
+                    v.motor_tests.append((MOTOR_AT_TEST_PLACE[int(m.param1)], m.param2, m.param3, m.param4))
             self.ack(m, result)
 
     def on_plan_message(self, m, kind):

@@ -83,7 +83,7 @@ class ExecGate:
         self.token = None
         self.owner = None
         self.until = 0.0
-        self.busy = False
+        self.busy = 0           # commands in progress: more than one only when an urgent one overtakes
         self.last_run = 0.0
 
     def active(self):
@@ -287,6 +287,9 @@ class Server:
                 await self.t.watching.wait()
             await asyncio.sleep(TICK_S)
             self.seq += 1
+            # With execution closed nothing may be sent, and that includes a landing promised earlier.
+            if not self.gate.active():
+                self.commander.give_up_landing()
             self.commander.tick()
             # Running out in the air would leave its holder without RTL or Land when they are needed most.
             if self.gate.active() and self.t.armed():
@@ -399,7 +402,7 @@ class Server:
             log.warning("command refused: %s bad %s", name, e)
             return self.reply(writer, 409, error="bad_param", field=str(e))
 
-        self.gate.busy = True
+        self.gate.busy += 1
         try:
             refused = await self.commander.refusal(action, params)
             if refused:
@@ -411,7 +414,7 @@ class Server:
             result, said = await self.commander.send(action, params)
             self.gate.last_run = time.monotonic()
         finally:
-            self.gate.busy = False
+            self.gate.busy -= 1
         effect = await self.commander.settle(action, params, result)    # holding nothing else up meanwhile
         self.gate.last_run = time.monotonic()
         outcome = "no_reply" if result is None else "accepted" if result == 0 else "refused"
